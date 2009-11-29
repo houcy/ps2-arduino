@@ -1,7 +1,12 @@
 #include <AFSoftSerial.h>
-#include <PS2Keyboard.h>
+#include "PS2Keyboard.h"
+
+#define KBD_CLK_PIN  3
+#define KBD_DATA_PIN 4
+#define is_printable(c) (!(c&0x80))
 
 AFSoftSerial lcdSerial =  AFSoftSerial(9, 10);
+PS2Keyboard keyboard;
 
 void setup()
 {
@@ -15,13 +20,19 @@ void setup()
   //clear lcd, set cursor to start
   lcdSerial.print(254,BYTE);
   lcdSerial.print(1,BYTE);
+  
+  //prep kbrd
+  keyboard.begin(KBD_DATA_PIN);
 }
 
 void loop()
 {
-  digitalWrite(13,HIGH);
-  delay(1000);
-  digitalWrite(13,LOW);
-  lcdSerial.print("hello world");
-  delay(1000);
+  if(keyboard.available())
+  {
+    byte c = keyboard.read();
+    if(is_printable(c))
+    {
+      lcdSerial.print(c, BYTE);
+    }
+  }
 }
