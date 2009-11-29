@@ -1,4 +1,5 @@
 #include <AFSoftSerial.h>
+#include <PS2Keyboard.h>
 
 AFSoftSerial lcdSerial =  AFSoftSerial(9, 10);
 
