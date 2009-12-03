@@ -8,6 +8,47 @@
 AFSoftSerial lcdSerial =  AFSoftSerial(9, 10);
 PS2Keyboard keyboard;
 
+const byte buffer_max = 5;
+byte buffer[buffer_max];
+byte buffer_pos = 0;
+
+void update_buffer(byte c)
+{
+  if(is_printable(c))
+  {
+    //protect agains overflow
+    if(buffer_pos < buffer_max)
+    {
+      //add text to buffer
+      buffer[buffer_pos] = c;
+      buffer_pos++;
+    }
+  }
+  else
+  {
+    if(c == 128) //backspace
+    {
+      if(buffer_pos > 0)
+      {
+        buffer_pos--;
+      }
+    }
+  }
+}
+
+void print_buffer()
+{
+  //clear lcd, set cursor to start
+  lcdSerial.print(254,BYTE);
+  lcdSerial.print(1,BYTE);
+
+  //print buffer
+  for(int i=0; i < buffer_pos; i++)
+  {
+    lcdSerial.print(buffer[i], BYTE);
+  }
+}
+
 void setup()
 {
   delay(5000);
@@ -23,6 +64,9 @@ void setup()
   
   //prep kbrd
   keyboard.begin(KBD_DATA_PIN);
+  
+  //signal ready
+  digitalWrite(13, 1);
 }
 
 void loop()
@@ -30,9 +74,7 @@ void loop()
   if(keyboard.available())
   {
     byte c = keyboard.read();
-    if(is_printable(c))
-    {
-      lcdSerial.print(c, BYTE);
-    }
+    update_buffer(c);
+    print_buffer();
   }
 }
