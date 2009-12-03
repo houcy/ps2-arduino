@@ -14,7 +14,7 @@ byte buffer_pos = 0;
 
 void update_buffer(byte c)
 {
-  if(is_printable(c))
+  if(c >= 32 && c <= 126) //white-list of printable chars
   {
     //protect agains overflow
     if(buffer_pos < buffer_max)
