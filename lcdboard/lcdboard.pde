@@ -1,11 +1,14 @@
-#include <AFSoftSerial.h>
+#include <SoftwareSerial.h>
 #include "PS2Keyboard.h"
+
+#define rxPin 11
+#define txPin 10
 
 #define KBD_CLK_PIN  3
 #define KBD_DATA_PIN 4
 #define is_printable(c) (!(c&0x80))
 
-AFSoftSerial lcdSerial =  AFSoftSerial(9, 10);
+SoftwareSerial lcdSerial =  SoftwareSerial(rxPin, txPin);
 PS2Keyboard keyboard;
 
 const int buffer_size = 25;
@@ -65,12 +68,11 @@ void print_buffer()
 
 void setup()
 {
-  //turn lcd on
-  digitalWrite(12, 1);
-
-  delay(5000);
+  delay(1000);
   
   //prep serial
+  pinMode(rxPin, INPUT);
+  pinMode(txPin, OUTPUT);
   lcdSerial.begin(9600);
   
   //set backlight to low
@@ -92,20 +94,21 @@ void setup()
   
   //signal ready
   digitalWrite(13, 1);
-
+  
+  delay(500)
+  
   //test code
-//  byte a = byte(65);
-//  update_buffer(a);
-//  print_buffer();
+  lcdSerial.print("Works!");
 }
 
 void loop()
 {
- 
+  /*
   if(keyboard.available())
   {
     byte c = keyboard.read();
     update_buffer(c);
     print_buffer();
   }
+  */
 }
