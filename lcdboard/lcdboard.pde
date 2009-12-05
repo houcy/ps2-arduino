@@ -13,19 +13,19 @@ PS2Keyboard keyboard;
 
 const int buffer_size = 25;
 const int screen_width = 20;
+const int screen_height = 4;
+const boolean debugging = false;
 
 byte buffer[buffer_size];
 int cursor_pos = 0;
 int buffer_used = 0;
 
-int row = 0;
-
 void update_buffer(byte c)
 {
-  if(c >= 32 && c <= 122) //white-list of printable chars
+  if(c >= 32 && c <= 122 || c == 10) //white-list of printable chars and enter
   {
     //protect against overflow
-    if(cursor_pos < screen_width)
+    if(buffer_used < screen_width)
     {
       //r-shift all chars after cursor
       for(int i = buffer_used; i >= cursor_pos; i--)
@@ -33,7 +33,7 @@ void update_buffer(byte c)
         buffer[i+1] = buffer[i];
       }
       
-      //character in position
+      //insert character in position
       buffer[cursor_pos] = c;
       cursor_pos++;
       buffer_used++;
@@ -73,23 +73,49 @@ void update_buffer(byte c)
 
 void print_buffer()
 {
+  int row = 0;
+  
   //clear lcd, set cursor to start
   lcdSerial.print(254, BYTE);
   lcdSerial.print(1, BYTE);
 
-  for(int i=0; i < buffer_used; i++)
+  //only print what is in the buffer
+  for(int i = 0; i < buffer_used; i++)
   {
-    if(buffer[i] == '\n')
+    //if newline, move down a line
+    if(buffer[i] == 10)
     {
-      return;
+      if(row >= 0 && row < 3)
+      {
+        lcdSerial.print(254, BYTE);
+        switch(row)
+        {
+          case 0:
+            lcdSerial.print(192, BYTE);
+            break;
+          case 1:
+            lcdSerial.print(148, BYTE);
+            break;
+          case 2:
+            lcdSerial.print(212, BYTE);
+            break;
+        }
+        row++;
+      }
     }
+
+    //if printable, print
     if(buffer[i] >= 32 && buffer[i] <= 122)
     {
       lcdSerial.print(buffer[i], BYTE);
     }
   }
   
-  //set the cursor
+  /*
+    set the cursor - the "cursor_pos" is from the start of 
+    the buffer, the actually displayed cursor needs adjusting
+    for the row etc.
+  */
   delay(100);
   lcdSerial.print(254, BYTE);
   lcdSerial.print(128 + cursor_pos, BYTE);
@@ -150,15 +176,27 @@ void setup()
   delay(500);
   
   //test code
-  lcdSerial.print("Works!");
+  lcdSerial.print("Press key to start..");
 }
 
 void loop()
 {
   if(keyboard.available())
   {
-    byte c = keyboard.read();
-    update_buffer(c);
-    print_buffer();
+    if(debugging)
+    {
+      //debug loop
+      byte c = keyboard.read();
+      lcdSerial.print(254, BYTE);
+      lcdSerial.print(1, BYTE);
+      lcdSerial.print(c, DEC);
+    }
+    else
+    {
+      //standard loop
+      byte c = keyboard.read();
+      update_buffer(c);
+      print_buffer();
+    }
   }
 }
