@@ -12,8 +12,11 @@ SoftwareSerial lcdSerial =  SoftwareSerial(rxPin, txPin);
 PS2Keyboard keyboard;
 
 const int buffer_size = 25;
+const int screen_width = 20;
+
 byte buffer[buffer_size];
-int buffer_pos = 0;
+int cursor_pos = 0;
+int buffer_used = 0;
 
 int row = 0;
 
@@ -22,20 +25,41 @@ void update_buffer(byte c)
   if(c >= 32 && c <= 122) //white-list of printable chars
   {
     //protect against overflow
-    if(buffer_pos < buffer_size)
+    if(cursor_pos < screen_width)
     {
       //add text to buffer
-      buffer[buffer_pos] = c;
-      buffer_pos++;
+      buffer[cursor_pos] = c;
+      cursor_pos++;
+      buffer_used++;
     }
   }
   else
   {
     if(c == 128) //backspace
     {
-      if(buffer_pos > 0)
+      if(cursor_pos > 0)
       {
-        buffer_pos--;
+        //r-shift all chars after deleted
+        for(int i = cursor_pos; i < buffer_used; i++)
+        {
+          buffer[i-1] = buffer[i];
+        }
+        buffer_used--;
+        cursor_pos--;
+      }
+    }
+    if(c == 131) //left arrow
+    {
+      if(cursor_pos < screen_width)
+      {
+        cursor_pos++;
+      }
+    }
+    if(c == 132) //right arrow
+    {
+      if(cursor_pos > 0)
+      {
+        cursor_pos--;
       }
     }
   }
@@ -47,55 +71,77 @@ void print_buffer()
   lcdSerial.print(254, BYTE);
   lcdSerial.print(1, BYTE);
 
-  //print only the current line.
-  int r = 0;  
-  for(int i=0; i < buffer_pos; i++)
+  for(int i=0; i < buffer_used; i++)
   {
-    /*
-      scroll down to the row (line) you want, each time you hit a newline char
-      you have started a new row.
-    */
     if(buffer[i] == '\n')
     {
-      r++;
+      return;
     }
-    if(r == row)
+    if(buffer[i] >= 32 && buffer[i] <= 122)
     {
       lcdSerial.print(buffer[i], BYTE);
     }
   }
+  
+  //set the cursor
+//  delay(100);
+//  lcdSerial.print(254, BYTE);
+//  lcdSerial.print(128, BYTE);
 }
 
 void setup()
 {
   delay(1000);
   
+  //prep kbrd
+  keyboard.begin(KBD_DATA_PIN);
+  
   //prep serial
   pinMode(rxPin, INPUT);
   pinMode(txPin, OUTPUT);
   lcdSerial.begin(9600);
   
+  delay(1000);
+    
   //set backlight to low
   lcdSerial.print(124, BYTE);
   lcdSerial.print(128, BYTE);
+
+  delay(100);
+
+  //set lcd to 20 cols
+  lcdSerial.print(124, BYTE);
+  lcdSerial.print(3, BYTE);
   
-  //set lcd type to 20x4
-//  lcdSerial.print(124, BYTE);
-//  lcdSerial.print(3, BYTE);
-//  lcdSerial.print(124, BYTE);
-//  lcdSerial.print(5, BYTE);
+  delay(100);
+  
+  //set lcd to 4 rows
+  lcdSerial.print(124, BYTE);
+  lcdSerial.print(5, BYTE);
+  
+  delay(100);
     
-  //clear lcd, set cursor to start
+  //clear lcd
   lcdSerial.print(254, BYTE);
   lcdSerial.print(1, BYTE);
+
+  delay(100);
+
+  //set cursor to start
+  lcdSerial.print(254, BYTE);
+  lcdSerial.print(0x80, BYTE);
+
+  delay(100);
   
-  //prep kbrd
-  keyboard.begin(KBD_DATA_PIN);
+  //turn on underline cursor
+  lcdSerial.print(254, BYTE);
+  lcdSerial.print(13, BYTE);
   
   //signal ready
   digitalWrite(13, 1);
-  
-  delay(500)
+
+  //seems to need this...???  
+  delay(500);
   
   //test code
   lcdSerial.print("Works!");
@@ -103,12 +149,10 @@ void setup()
 
 void loop()
 {
-  /*
   if(keyboard.available())
   {
     byte c = keyboard.read();
     update_buffer(c);
     print_buffer();
   }
-  */
 }
