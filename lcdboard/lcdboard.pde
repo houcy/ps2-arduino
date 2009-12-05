@@ -27,7 +27,13 @@ void update_buffer(byte c)
     //protect against overflow
     if(cursor_pos < screen_width)
     {
-      //add text to buffer
+      //r-shift all chars after cursor
+      for(int i = buffer_used; i >= cursor_pos; i--)
+      {
+        buffer[i+1] = buffer[i];
+      }
+      
+      //character in position
       buffer[cursor_pos] = c;
       cursor_pos++;
       buffer_used++;
@@ -39,7 +45,7 @@ void update_buffer(byte c)
     {
       if(cursor_pos > 0)
       {
-        //r-shift all chars after deleted
+        //l-shift all chars after deleted
         for(int i = cursor_pos; i < buffer_used; i++)
         {
           buffer[i-1] = buffer[i];
@@ -48,14 +54,14 @@ void update_buffer(byte c)
         cursor_pos--;
       }
     }
-    if(c == 131) //left arrow
+    if(c == 132) //right arrow
     {
       if(cursor_pos < screen_width)
       {
         cursor_pos++;
       }
     }
-    if(c == 132) //right arrow
+    if(c == 131) //left arrow
     {
       if(cursor_pos > 0)
       {
@@ -84,9 +90,9 @@ void print_buffer()
   }
   
   //set the cursor
-//  delay(100);
-//  lcdSerial.print(254, BYTE);
-//  lcdSerial.print(128, BYTE);
+  delay(100);
+  lcdSerial.print(254, BYTE);
+  lcdSerial.print(128 + cursor_pos, BYTE);
 }
 
 void setup()
