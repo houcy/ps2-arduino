@@ -10,9 +10,11 @@ PS2Keyboard keyboard;
 
 void setup()
 {
+  Serial.begin(9600); 
+  Serial.print("setup()");
+  
   delay(1000);
   keyboard.begin(KBD_DATA_PIN);
-  Serial.print("setup()");
 }
 
 void loop()
