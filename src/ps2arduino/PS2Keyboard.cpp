@@ -26,11 +26,10 @@
 #include <avr/io.h>
 #include <avr/interrupt.h>
 #include <avr/pgmspace.h>
-#include "WProgram.h"
+#include "Arduino.h"
 #include "PS2Keyboard.h"
 
 #include "binary.h"
-typedef uint8_t boolean;
 typedef uint8_t byte;
 
 /*
@@ -416,6 +415,5 @@ byte PS2Keyboard::read() {
 
   return(result);
 }
-
 
 

@@ -55,7 +55,6 @@
 
 
 #include "binary.h"
-typedef uint8_t boolean;
 typedef uint8_t byte;
 
 /*
