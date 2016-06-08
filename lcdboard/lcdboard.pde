@@ -12,17 +12,46 @@ SoftwareSerial lcdSerial =  SoftwareSerial(rxPin, txPin);
 PS2Keyboard keyboard;
 
 const int buffer_size = 25;
-const int screen_width = 20;
-const int screen_height = 4;
+const byte screen_width = 20;
+const byte screen_height = 4;
 const boolean debugging = false;
 
 byte buffer[buffer_size];
 int cursor_pos = 0;
 int buffer_used = 0;
 
-void update_buffer(byte c)
+byte backlight = 128; 
+
+void update_buffer(byte c, byte e)
 {
-  if(c >= 32 && c <= 122 || c == 10) //white-list of printable chars and enter
+  //check for control chars
+  if(e & 1) //control key
+  {
+    if(c == 129) //up key
+    {
+      if(backlight < 157)
+      {
+        backlight++;
+        lcdSerial.print(124, BYTE);
+        lcdSerial.print(backlight, BYTE);
+        delay(100);
+      }
+    }
+    if(c == 130) //down key
+    {
+      if(backlight > 128)
+      {
+        backlight--;
+        lcdSerial.print(124, BYTE);
+        lcdSerial.print(backlight, BYTE);
+        delay(100);
+      }
+    }
+    return;
+  }
+  
+  //white-list of printable chars and enter
+  if(c >= 32 && c <= 122 || c == 10)
   {
     //protect against overflow
     if(buffer_used < screen_width)
@@ -116,9 +145,9 @@ void print_buffer()
     the buffer, the actually displayed cursor needs adjusting
     for the row etc.
   */
-  delay(100);
-  lcdSerial.print(254, BYTE);
-  lcdSerial.print(128 + cursor_pos, BYTE);
+//  delay(100);
+//  lcdSerial.print(254, BYTE);
+//  lcdSerial.print(128 + cursor_pos, BYTE);
 }
 
 void setup()
@@ -137,7 +166,7 @@ void setup()
     
   //set backlight to low
   lcdSerial.print(124, BYTE);
-  lcdSerial.print(128, BYTE);
+  lcdSerial.print(backlight, BYTE);
 
   delay(100);
 
@@ -194,8 +223,9 @@ void loop()
     else
     {
       //standard loop
+      byte e = keyboard.read_extra();
       byte c = keyboard.read();
-      update_buffer(c);
+      update_buffer(c, e);
       print_buffer();
     }
   }
