@@ -3,10 +3,35 @@
   Copyright (c) 2007 Free Software Foundation.  All right reserved.
   Written by Christian Weichel <info@32leaves.net>
 
+  ** Mostly rewritten Paul Stoffregen <paul@pjrc.com> 2010, 2011
   ** Modified for use beginning with Arduino 13 by L. Abraham Smith, <n3bah@microcompdesign.com> * 
+  ** Modified for easy interrup pin assignement on method begin(datapin,irq_pin). Cuningan <cuninganreset@gmail.com> **
 
-  ** Modified to include: shift, alt, caps_lock, caps_lock light, and hot-plugging a kbd  *
-  ** by Bill Oldfield 22/7/09 *
+  for more information you can read the original wiki in arduino.cc
+  at http://www.arduino.cc/playground/Main/PS2Keyboard
+  or http://www.pjrc.com/teensy/td_libs_PS2Keyboard.html
+
+  Version 2.4 (March 2013)
+  - Support Teensy 3.0, Arduino Due, Arduino Leonardo & other boards
+  - French keyboard layout, David Chochoi, tchoyyfr at yahoo dot fr
+
+  Version 2.3 (October 2011)
+  - Minor bugs fixed
+
+  Version 2.2 (August 2011)
+  - Support non-US keyboards - thanks to Rainer Bruch for a German keyboard :)
+
+  Version 2.1 (May 2011)
+  - timeout to recover from misaligned input
+  - compatibility with Arduino "new-extension" branch
+  - TODO: send function, proposed by Scott Penrose, scooterda at me dot com
+
+  Version 2.0 (June 2010)
+  - Buffering added, many scan codes can be captured without data loss
+    if your sketch is busy doing other work
+  - Shift keys supported, completely rewritten scan code to ascii
+  - Slow linear search replaced with fast indexed table lookups
+  - Support for Teensy, Arduino Mega, and Sanguino added
 
   This library is free software; you can redistribute it and/or
   modify it under the terms of the GNU Lesser General Public
@@ -23,397 +48,407 @@
   Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
 */
 
-#include <avr/io.h>
-#include <avr/interrupt.h>
-#include <avr/pgmspace.h>
-#include "Arduino.h"
 #include "PS2Keyboard.h"
 
-#include "binary.h"
-typedef uint8_t byte;
-
-/*
- * I do know this is so uncool, but I just don't see a way arround it
- * REALLY BAD STUFF AHEAD
- *
- * The variables are used for internal status management of the ISR. The're
- * not kept in the object instance because the ISR has to be as fast as anyhow
- * possible. So the overhead of a CPP method call is to be avoided.
- *
- * PLEASE DO NOT REFER TO THESE VARIABLES IN YOUR CODE AS THEY MIGHT VANISH SOME
- * HAPPY DAY.
- */
-int  ps2Keyboard_DataPin;
-byte ps2Keyboard_CurrentBuffer;
-volatile byte ps2Keyboard_CharBuffer;
-volatile byte ps2Keyboard_BufferPos;
-
-// variables used to remember information about key presses
-volatile bool ps2Keyboard_shift;     // indicates shift key is pressed
-volatile bool ps2Keyboard_ctrl;      // indicates the ctrl key is pressed
-volatile bool ps2Keyboard_alt;       // indicates the alt key is pressed
-volatile bool ps2Keyboard_extend;    // remembers a keyboard extended char received
-volatile bool ps2Keyboard_release;   // distinguishes key presses from releases
-volatile bool ps2Keyboard_caps_lock; // remembers shift lock has been pressed
-
-// vairables used in sending command bytes to the keyboard, eg caps_lock light
-volatile boolean cmd_in_progress;
-volatile int     cmd_count;
-         byte    cmd_value;
-volatile byte    cmd_ack_value;
-         byte    cmd_parity;
-volatile boolean cmd_ack_byte_ok;
-
-// sending command bytes to the keybaord needs proper parity (otherwise the keyboard
-// just asks you to repeat the byte)
-byte odd_parity(byte val) {
-  int i, count = 1;  // start with 0 for even parity
-  for (i=0; i<8; i++) {
-    if (val&1) count++;
-    val = val>>1;
-  }
-  return count & 1; // bottom bit of count is parity bit
-}
-
-void kbd_send_command(byte val) {
-  // stop interrupt routine from receiving characters so that we can use it
-  // to send a byte
-  cmd_in_progress = true;
-  cmd_count       = 0;
-
-  // set up the byte to shift out and initialise the ack bit
-  cmd_value      = val;
-  cmd_ack_value  = 1;    // the kbd will clear this bit on receiving the byte
-  cmd_parity     = odd_parity(val);
-
-  // set the data pin as an output, ready for driving
-  digitalWrite(ps2Keyboard_DataPin, HIGH);
-  pinMode(ps2Keyboard_DataPin, OUTPUT);
-
-  // drive clock pin low - this is going to generate the first
-  // interrupt of the shifting out process
-  pinMode(PS2_INT_PIN, OUTPUT);
-  digitalWrite(PS2_INT_PIN, LOW);
-
-  // wait at least one clock cycle (in case the kbd is mid transmission)
-  delayMicroseconds(60);
-
-  // set up the 0 start bit
-  digitalWrite(ps2Keyboard_DataPin, LOW);
-  // let go of clock - the kbd takes over driving the clock from here
-  digitalWrite(PS2_INT_PIN, HIGH);
-  pinMode(PS2_INT_PIN, INPUT);
-
-  // wait for interrupt routine to shift out byte, parity and receive ack bit
-  while (cmd_ack_value!=0) ;
-
-  // switch back to the interrupt routine receiving characters from the kbd
-  cmd_in_progress = false;
-}
-
-void PS2Keyboard::reset() {
-  kbd_send_command(0xFF);   // send the kbd reset code to the kbd: 3 lights
-                            // should flash briefly on the kbd
-
-  // reset all the global variables
-  ps2Keyboard_CurrentBuffer = 0;
-  ps2Keyboard_CharBuffer    = 0;
-  ps2Keyboard_BufferPos     = 0;
-  ps2Keyboard_shift         = false;
-  ps2Keyboard_ctrl          = false;
-  ps2Keyboard_alt           = false;
-  ps2Keyboard_extend        = false;
-  ps2Keyboard_release       = false;
-  ps2Keyboard_caps_lock     = false;
-  cmd_in_progress           = false;
-  cmd_count                 = 0;
-  cmd_value                 = 0;
-  cmd_ack_value             = 1;
-}
-
-// val : bit_2=caps_lock, bit_1=num_lock, bit_0=scroll_lock
-void kbd_set_lights(byte val) {
-  // When setting the lights with the 0xED command the keyboard responds
-  // with an "ack byte", 0xFA. This is NOT the same as the "ack bit" that
-  // follows the succesful shifting of each command byte. See this web
-  // page for a good description of all this:
-  // http://www.beyondlogic.org/keyboard/keybrd.htm
-  cmd_ack_byte_ok = false;   // initialise the ack byte flag
-  kbd_send_command(0xED);    // send the command byte
-  while (!cmd_ack_byte_ok) ; // ack byte from keyboard sets this flag
-  kbd_send_command(val);     // now send the data
-}
+#define BUFFER_SIZE 45
+static volatile uint8_t buffer[BUFFER_SIZE];
+static volatile uint8_t head, tail;
+static uint8_t DataPin;
+static uint8_t CharBuffer=0;
+static uint8_t UTF8next=0;
+static const PS2Keymap_t *keymap=NULL;
 
 // The ISR for the external interrupt
-// This may look like a lot of code for an Interrupt routine, but the switch
-// statements are fast and the path through the routine is only ever a few
-// simple lines of code.
-void ps2interrupt (void) {
-  int value = digitalRead(ps2Keyboard_DataPin);
+void ps2interrupt(void)
+{
+	static uint8_t bitcount=0;
+	static uint8_t incoming=0;
+	static uint32_t prev_ms=0;
+	uint32_t now_ms;
+	uint8_t n, val;
 
-  // This is the code to send a byte to the keyboard. Actually its 12 bits:
-  // a start bit, 8 data bits, 1 parity, 1 stop bit, 1 ack bit (from the kbd)
-  if (cmd_in_progress) {
-    cmd_count++;          // cmd_count keeps track of the shifting
-    switch (cmd_count) {
-    case 1: // start bit
-      digitalWrite(ps2Keyboard_DataPin,LOW);
-      break;
-    case 2: case 3: case 4: case 5: case 6: case 7: case 8: case 9:
-      // data bits to shift
-      digitalWrite(ps2Keyboard_DataPin,cmd_value&1);
-      cmd_value = cmd_value>>1;
-      break;
-    case 10:  // parity bit
-      digitalWrite(ps2Keyboard_DataPin,cmd_parity);
-      break;
-    case 11:  // stop bit
-      // release the data pin, so stop bit actually relies on pull-up
-      // but this ensures the data pin is ready to be driven by the kbd for
-      // for the next bit.
-      digitalWrite(ps2Keyboard_DataPin, HIGH);
-      pinMode(ps2Keyboard_DataPin, INPUT);
-      break;
-    case 12: // ack bit - driven by the kbd, so we read its value
-      cmd_ack_value = digitalRead(ps2Keyboard_DataPin);
-      cmd_in_progress = false;  // done shifting out
-    }
-    return; // don't fall through to the receive section of the ISR
-  }
-
-  // receive section of the ISR
-  // shift the bits in
-  if(ps2Keyboard_BufferPos > 0 && ps2Keyboard_BufferPos < 11) {
-    ps2Keyboard_CurrentBuffer |= (value << (ps2Keyboard_BufferPos - 1));
-  }
-  ps2Keyboard_BufferPos++; // keep track of shift-in position
-
-  if(ps2Keyboard_BufferPos == 11) { // a complete character received
-    switch (ps2Keyboard_CurrentBuffer) {
-    case 0xF0: { // key release char
-      ps2Keyboard_release = true;
-      ps2Keyboard_extend = false;
-      break;
-    }
-    case 0xFA: { // command acknowlegde byte
-      cmd_ack_byte_ok = true;
-      break;
-    }
-    case 0xE0: { // extended char set
-      ps2Keyboard_extend = true;
-      break;
-    }
-    case 0x12:   // left shift
-    case 0x59: { // right shift
-      ps2Keyboard_shift = ps2Keyboard_release? false : true;
-      ps2Keyboard_release = false;
-      break;
-    }
-    case 0x11: { // alt key (right alt is extended 0x11)
-      ps2Keyboard_alt = ps2Keyboard_release? false : true;
-      ps2Keyboard_release = false;
-      break;
-    }
-    case 0x14: { // ctrl key (right ctrl is extended 0x14)
-      ps2Keyboard_ctrl = ps2Keyboard_release? false : true;
-      ps2Keyboard_release = false;
-      break;
-    }
-    case 0x58: { // caps lock key
-      if (!ps2Keyboard_release) {
-	ps2Keyboard_caps_lock = ps2Keyboard_caps_lock? false : true;
-	// allow caps lock code through to enable light on and off
-        ps2Keyboard_CharBuffer = ps2Keyboard_CurrentBuffer;
-      }
-      else {
-	ps2Keyboard_release = false;
-      }
-      break;
-    }
-    default: { // a real key
-      if (ps2Keyboard_release) { // although ignore if its just released
-        ps2Keyboard_release = false;
-      }
-      else { // real keys go into CharBuffer
-        ps2Keyboard_CharBuffer = ps2Keyboard_CurrentBuffer;
-      }
-    }
-    }
-    ps2Keyboard_CurrentBuffer = 0;
-    ps2Keyboard_BufferPos = 0;
-  }
+	val = digitalRead(DataPin);
+	now_ms = millis();
+	if (now_ms - prev_ms > 250) {
+		bitcount = 0;
+		incoming = 0;
+	}
+	prev_ms = now_ms;
+	n = bitcount - 1;
+	if (n <= 7) {
+		incoming |= (val << n);
+	}
+	bitcount++;
+	if (bitcount == 11) {
+		uint8_t i = head + 1;
+		if (i >= BUFFER_SIZE) i = 0;
+		if (i != tail) {
+			buffer[i] = incoming;
+			head = i;
+		}
+		bitcount = 0;
+		incoming = 0;
+	}
 }
 
-PS2Keyboard::PS2Keyboard() {
-  // nothing to do here	
+static inline uint8_t get_scan_code(void)
+{
+	uint8_t c, i;
+
+	i = tail;
+	if (i == head) return 0;
+	i++;
+	if (i >= BUFFER_SIZE) i = 0;
+	c = buffer[i];
+	tail = i;
+	return c;
 }
 
-void PS2Keyboard::begin(int dataPin) {
-  // Prepare the global variables
-  ps2Keyboard_DataPin       = dataPin;
-  ps2Keyboard_CurrentBuffer = 0;
-  ps2Keyboard_CharBuffer    = 0;
-  ps2Keyboard_BufferPos     = 0;
-  ps2Keyboard_shift         = false;
-  ps2Keyboard_ctrl          = false;
-  ps2Keyboard_alt           = false;
-  ps2Keyboard_extend        = false;
-  ps2Keyboard_release       = false;
-  ps2Keyboard_caps_lock     = false;
-  cmd_in_progress           = false;
-  cmd_count                 = 0;
-  cmd_value                 = 0;
-  cmd_ack_value             = 1;
+// http://www.quadibloc.com/comp/scan.htm
+// http://www.computer-engineering.org/ps2keyboard/scancodes2.html
 
-  // initialize the pins
-  pinMode(PS2_INT_PIN, INPUT);
-  digitalWrite(PS2_INT_PIN, HIGH);
-  pinMode(dataPin, INPUT);
-  digitalWrite(dataPin, HIGH);
+// These arrays provide a simple key map, to turn scan codes into ISO8859
+// output.  If a non-US keyboard is used, these may need to be modified
+// for the desired output.
+//
 
-  attachInterrupt(1, ps2interrupt, FALLING);
-#if 0
-  // Global Enable INT1 interrupt
-  EIMSK |= ( 1 << INT1);
-  // Falling edge triggers interrupt
-  EICRA |= (0 << ISC10) | (1 << ISC11);
-#endif
+const PROGMEM PS2Keymap_t PS2Keymap_US = {
+  // without shift
+	{0, PS2_F9, 0, PS2_F5, PS2_F3, PS2_F1, PS2_F2, PS2_F12,
+	0, PS2_F10, PS2_F8, PS2_F6, PS2_F4, PS2_TAB, '`', 0,
+	0, 0 /*Lalt*/, 0 /*Lshift*/, 0, 0 /*Lctrl*/, 'q', '1', 0,
+	0, 0, 'z', 's', 'a', 'w', '2', 0,
+	0, 'c', 'x', 'd', 'e', '4', '3', 0,
+	0, ' ', 'v', 'f', 't', 'r', '5', 0,
+	0, 'n', 'b', 'h', 'g', 'y', '6', 0,
+	0, 0, 'm', 'j', 'u', '7', '8', 0,
+	0, ',', 'k', 'i', 'o', '0', '9', 0,
+	0, '.', '/', 'l', ';', 'p', '-', 0,
+	0, 0, '\'', 0, '[', '=', 0, 0,
+	0 /*CapsLock*/, 0 /*Rshift*/, PS2_ENTER /*Enter*/, ']', 0, '\\', 0, 0,
+	0, 0, 0, 0, 0, 0, PS2_BACKSPACE, 0,
+	0, '1', 0, '4', '7', 0, 0, 0,
+	'0', '.', '2', '5', '6', '8', PS2_ESC, 0 /*NumLock*/,
+	PS2_F11, '+', '3', '-', '*', '9', PS2_SCROLL, 0,
+	0, 0, 0, PS2_F7 },
+  // with shift
+	{0, PS2_F9, 0, PS2_F5, PS2_F3, PS2_F1, PS2_F2, PS2_F12,
+	0, PS2_F10, PS2_F8, PS2_F6, PS2_F4, PS2_TAB, '~', 0,
+	0, 0 /*Lalt*/, 0 /*Lshift*/, 0, 0 /*Lctrl*/, 'Q', '!', 0,
+	0, 0, 'Z', 'S', 'A', 'W', '@', 0,
+	0, 'C', 'X', 'D', 'E', '$', '#', 0,
+	0, ' ', 'V', 'F', 'T', 'R', '%', 0,
+	0, 'N', 'B', 'H', 'G', 'Y', '^', 0,
+	0, 0, 'M', 'J', 'U', '&', '*', 0,
+	0, '<', 'K', 'I', 'O', ')', '(', 0,
+	0, '>', '?', 'L', ':', 'P', '_', 0,
+	0, 0, '"', 0, '{', '+', 0, 0,
+	0 /*CapsLock*/, 0 /*Rshift*/, PS2_ENTER /*Enter*/, '}', 0, '|', 0, 0,
+	0, 0, 0, 0, 0, 0, PS2_BACKSPACE, 0,
+	0, '1', 0, '4', '7', 0, 0, 0,
+	'0', '.', '2', '5', '6', '8', PS2_ESC, 0 /*NumLock*/,
+	PS2_F11, '+', '3', '-', '*', '9', PS2_SCROLL, 0,
+	0, 0, 0, PS2_F7 },
+	0
+};
+
+
+const PROGMEM PS2Keymap_t PS2Keymap_German = {
+  // without shift
+	{0, PS2_F9, 0, PS2_F5, PS2_F3, PS2_F1, PS2_F2, PS2_F12,
+	0, PS2_F10, PS2_F8, PS2_F6, PS2_F4, PS2_TAB, '^', 0,
+	0, 0 /*Lalt*/, 0 /*Lshift*/, 0, 0 /*Lctrl*/, 'q', '1', 0,
+	0, 0, 'y', 's', 'a', 'w', '2', 0,
+	0, 'c', 'x', 'd', 'e', '4', '3', 0,
+	0, ' ', 'v', 'f', 't', 'r', '5', 0,
+	0, 'n', 'b', 'h', 'g', 'z', '6', 0,
+	0, 0, 'm', 'j', 'u', '7', '8', 0,
+	0, ',', 'k', 'i', 'o', '0', '9', 0,
+	0, '.', '-', 'l', PS2_o_DIAERESIS, 'p', PS2_SHARP_S, 0,
+	0, 0, PS2_a_DIAERESIS, 0, PS2_u_DIAERESIS, '\'', 0, 0,
+	0 /*CapsLock*/, 0 /*Rshift*/, PS2_ENTER /*Enter*/, '+', 0, '#', 0, 0,
+	0, '<', 0, 0, 0, 0, PS2_BACKSPACE, 0,
+	0, '1', 0, '4', '7', 0, 0, 0,
+	'0', '.', '2', '5', '6', '8', PS2_ESC, 0 /*NumLock*/,
+	PS2_F11, '+', '3', '-', '*', '9', PS2_SCROLL, 0,
+	0, 0, 0, PS2_F7 },
+  // with shift
+	{0, PS2_F9, 0, PS2_F5, PS2_F3, PS2_F1, PS2_F2, PS2_F12,
+	0, PS2_F10, PS2_F8, PS2_F6, PS2_F4, PS2_TAB, PS2_DEGREE_SIGN, 0,
+	0, 0 /*Lalt*/, 0 /*Lshift*/, 0, 0 /*Lctrl*/, 'Q', '!', 0,
+	0, 0, 'Y', 'S', 'A', 'W', '"', 0,
+	0, 'C', 'X', 'D', 'E', '$', PS2_SECTION_SIGN, 0,
+	0, ' ', 'V', 'F', 'T', 'R', '%', 0,
+	0, 'N', 'B', 'H', 'G', 'Z', '&', 0,
+	0, 0, 'M', 'J', 'U', '/', '(', 0,
+	0, ';', 'K', 'I', 'O', '=', ')', 0,
+	0, ':', '_', 'L', PS2_O_DIAERESIS, 'P', '?', 0,
+	0, 0, PS2_A_DIAERESIS, 0, PS2_U_DIAERESIS, '`', 0, 0,
+	0 /*CapsLock*/, 0 /*Rshift*/, PS2_ENTER /*Enter*/, '*', 0, '\'', 0, 0,
+	0, '>', 0, 0, 0, 0, PS2_BACKSPACE, 0,
+	0, '1', 0, '4', '7', 0, 0, 0,
+	'0', '.', '2', '5', '6', '8', PS2_ESC, 0 /*NumLock*/,
+	PS2_F11, '+', '3', '-', '*', '9', PS2_SCROLL, 0,
+	0, 0, 0, PS2_F7 },
+	1,
+  // with altgr
+	{0, PS2_F9, 0, PS2_F5, PS2_F3, PS2_F1, PS2_F2, PS2_F12,
+	0, PS2_F10, PS2_F8, PS2_F6, PS2_F4, PS2_TAB, 0, 0,
+	0, 0 /*Lalt*/, 0 /*Lshift*/, 0, 0 /*Lctrl*/, '@', 0, 0,
+	0, 0, 0, 0, 0, 0, PS2_SUPERSCRIPT_TWO, 0,
+	0, 0, 0, 0, PS2_CURRENCY_SIGN, 0, PS2_SUPERSCRIPT_THREE, 0,
+	0, 0, 0, 0, 0, 0, 0, 0,
+	0, 0, 0, 0, 0, 0, 0, 0,
+	0, 0, PS2_MICRO_SIGN, 0, 0, '{', '[', 0,
+	0, 0, 0, 0, 0, '}', ']', 0,
+	0, 0, 0, 0, 0, 0, '\\', 0,
+	0, 0, 0, 0, 0, 0, 0, 0,
+	0 /*CapsLock*/, 0 /*Rshift*/, PS2_ENTER /*Enter*/, '~', 0, '#', 0, 0,
+	0, '|', 0, 0, 0, 0, PS2_BACKSPACE, 0,
+	0, '1', 0, '4', '7', 0, 0, 0,
+	'0', '.', '2', '5', '6', '8', PS2_ESC, 0 /*NumLock*/,
+	PS2_F11, '+', '3', '-', '*', '9', PS2_SCROLL, 0,
+	0, 0, 0, PS2_F7 }
+};
+
+
+const PROGMEM PS2Keymap_t PS2Keymap_French = {
+  // without shift
+	{0, PS2_F9, 0, PS2_F5, PS2_F3, PS2_F1, PS2_F2, PS2_F12,
+	0, PS2_F10, PS2_F8, PS2_F6, PS2_F4, PS2_TAB, PS2_SUPERSCRIPT_TWO, 0,
+	0, 0 /*Lalt*/, 0 /*Lshift*/, 0, 0 /*Lctrl*/, 'a', '&', 0,
+	0, 0, 'w', 's', 'q', 'z', PS2_e_ACUTE, 0,
+	0, 'c', 'x', 'd', 'e', '\'', '"', 0,
+	0, ' ', 'v', 'f', 't', 'r', '(', 0,
+	0, 'n', 'b', 'h', 'g', 'y', '-', 0,
+	0, 0, ',', 'j', 'u', PS2_e_GRAVE, '_', 0,
+	0, ';', 'k', 'i', 'o', PS2_a_GRAVE, PS2_c_CEDILLA, 0,
+	0, ':', '!', 'l', 'm', 'p', ')', 0,
+	0, 0, PS2_u_GRAVE, 0, '^', '=', 0, 0,
+	0 /*CapsLock*/, 0 /*Rshift*/, PS2_ENTER /*Enter*/, '$', 0, '*', 0, 0,
+	0, '<', 0, 0, 0, 0, PS2_BACKSPACE, 0,
+	0, '1', 0, '4', '7', 0, 0, 0,
+	'0', '.', '2', '5', '6', '8', PS2_ESC, 0 /*NumLock*/,
+	PS2_F11, '+', '3', '-', '*', '9', PS2_SCROLL, 0,
+	0, 0, 0, PS2_F7 },
+  // with shift
+	{0, PS2_F9, 0, PS2_F5, PS2_F3, PS2_F1, PS2_F2, PS2_F12,
+	0, PS2_F10, PS2_F8, PS2_F6, PS2_F4, PS2_TAB, 0, 0,
+	0, 0 /*Lalt*/, 0 /*Lshift*/, 0, 0 /*Lctrl*/, 'A', '1', 0,
+	0, 0, 'W', 'S', 'Q', 'Z', '2', 0,
+	0, 'C', 'X', 'D', 'E', '4', '3', 0,
+	0, ' ', 'V', 'F', 'T', 'R', '5', 0,
+	0, 'N', 'B', 'H', 'G', 'Y', '6', 0,
+	0, 0, '?', 'J', 'U', '7', '8', 0,
+	0, '.', 'K', 'I', 'O', '0', '9', 0,
+	0, '/', PS2_SECTION_SIGN, 'L', 'M', 'P', PS2_DEGREE_SIGN, 0,
+	0, 0, '%', 0, PS2_DIAERESIS, '+', 0, 0,
+	0 /*CapsLock*/, 0 /*Rshift*/, PS2_ENTER /*Enter*/, PS2_POUND_SIGN, 0, PS2_MICRO_SIGN, 0, 0,
+	0, '>', 0, 0, 0, 0, PS2_BACKSPACE, 0,
+	0, '1', 0, '4', '7', 0, 0, 0,
+	'0', '.', '2', '5', '6', '8', PS2_ESC, 0 /*NumLock*/,
+	PS2_F11, '+', '3', '-', '*', '9', PS2_SCROLL, 0,
+	0, 0, 0, PS2_F7 },
+	1,
+  // with altgr
+	{0, PS2_F9, 0, PS2_F5, PS2_F3, PS2_F1, PS2_F2, PS2_F12,
+	0, PS2_F10, PS2_F8, PS2_F6, PS2_F4, PS2_TAB, 0, 0,
+	0, 0 /*Lalt*/, 0 /*Lshift*/, 0, 0 /*Lctrl*/, '@', 0, 0,
+	0, 0, 0, 0, 0, 0, '~', 0,
+	0, 0, 0, 0, 0 /*PS2_EURO_SIGN*/, '{', '#', 0,
+	0, 0, 0, 0, 0, 0, '[', 0,
+	0, 0, 0, 0, 0, 0, '|', 0,
+	0, 0, 0, 0, 0, '`', '\\', 0,
+	0, 0, 0, 0, 0, '@', '^', 0,
+	0, 0, 0, 0, 0, 0, ']', 0,
+	0, 0, 0, 0, 0, 0, '}', 0,
+	0 /*CapsLock*/, 0 /*Rshift*/, PS2_ENTER /*Enter*/, '¤', 0, '#', 0, 0,
+	0, '|', 0, 0, 0, 0, PS2_BACKSPACE, 0,
+	0, '1', 0, '4', '7', 0, 0, 0,
+	'0', '.', '2', '5', '6', '8', PS2_ESC, 0 /*NumLock*/,
+	PS2_F11, '+', '3', '-', '*', '9', PS2_SCROLL, 0,
+	0, 0, 0, PS2_F7 }
+};
+
+
+#define BREAK     0x01
+#define MODIFIER  0x02
+#define SHIFT_L   0x04
+#define SHIFT_R   0x08
+#define ALTGR     0x10
+
+static char get_iso8859_code(void)
+{
+	static uint8_t state=0;
+	uint8_t s;
+	char c;
+
+	while (1) {
+		s = get_scan_code();
+		if (!s) return 0;
+		if (s == 0xF0) {
+			state |= BREAK;
+		} else if (s == 0xE0) {
+			state |= MODIFIER;
+		} else {
+			if (state & BREAK) {
+				if (s == 0x12) {
+					state &= ~SHIFT_L;
+				} else if (s == 0x59) {
+					state &= ~SHIFT_R;
+				} else if (s == 0x11 && (state & MODIFIER)) {
+					state &= ~ALTGR;
+				}
+				// CTRL, ALT & WIN keys could be added
+				// but is that really worth the overhead?
+				state &= ~(BREAK | MODIFIER);
+				continue;
+			}
+			if (s == 0x12) {
+				state |= SHIFT_L;
+				continue;
+			} else if (s == 0x59) {
+				state |= SHIFT_R;
+				continue;
+			} else if (s == 0x11 && (state & MODIFIER)) {
+				state |= ALTGR;
+			}
+			c = 0;
+			if (state & MODIFIER) {
+				switch (s) {
+				  case 0x70: c = PS2_INSERT;      break;
+				  case 0x6C: c = PS2_HOME;        break;
+				  case 0x7D: c = PS2_PAGEUP;      break;
+				  case 0x71: c = PS2_DELETE;      break;
+				  case 0x69: c = PS2_END;         break;
+				  case 0x7A: c = PS2_PAGEDOWN;    break;
+				  case 0x75: c = PS2_UPARROW;     break;
+				  case 0x6B: c = PS2_LEFTARROW;   break;
+				  case 0x72: c = PS2_DOWNARROW;   break;
+				  case 0x74: c = PS2_RIGHTARROW;  break;
+				  case 0x4A: c = '/';             break;
+				  case 0x5A: c = PS2_ENTER;       break;
+				  default: break;
+				}
+			} else if ((state & ALTGR) && keymap->uses_altgr) {
+				if (s < PS2_KEYMAP_SIZE)
+					c = pgm_read_byte(keymap->altgr + s);
+			} else if (state & (SHIFT_L | SHIFT_R)) {
+				if (s < PS2_KEYMAP_SIZE)
+					c = pgm_read_byte(keymap->shift + s);
+			} else {
+				if (s < PS2_KEYMAP_SIZE)
+					c = pgm_read_byte(keymap->noshift + s);
+			}
+			state &= ~(BREAK | MODIFIER);
+			if (c) return c;
+		}
+	}
 }
 
 bool PS2Keyboard::available() {
-  return ps2Keyboard_CharBuffer != 0;
+	if (CharBuffer || UTF8next) return true;
+	CharBuffer = get_iso8859_code();
+	if (CharBuffer) return true;
+	return false;
 }
 
-// This routine allows a calling program to see if other other keys are held
-// down when a character is received: ie <ctrl>, <alt>, <shift> or <shift_lock>
-// Note that this routine must be called after available() has returned true,
-// but BEFORE read(). The read() routine clears the buffer and allows another
-// character to be received so these bits can change anytime after the read().
-byte PS2Keyboard::read_extra() {
-  return (ps2Keyboard_caps_lock<<3) |
-         (ps2Keyboard_shift<<2) |
-         (ps2Keyboard_alt<<1) |
-          ps2Keyboard_ctrl;
+int PS2Keyboard::read() {
+	uint8_t result;
+
+	result = UTF8next;
+	if (result) {
+		UTF8next = 0;
+	} else {
+		result = CharBuffer;
+		if (result) {
+			CharBuffer = 0;
+		} else {
+			result = get_iso8859_code();
+		}
+		if (result >= 128) {
+			UTF8next = (result & 0x3F) | 0x80;
+			result = ((result >> 6) & 0x1F) | 0xC0;
+		}
+	}
+	if (!result) return -1;
+	return result;
 }
 
-byte PS2Keyboard::read() {
-  byte result;
+PS2Keyboard::PS2Keyboard() {
+  // nothing to do here, begin() does it all
+}
 
-  // read the raw data from the keyboard
-  result = ps2Keyboard_CharBuffer;
+void PS2Keyboard::begin(uint8_t data_pin, uint8_t irq_pin, const PS2Keymap_t &map) {
+  uint8_t irq_num=255;
 
-  // Use a switch for the code to character conversion.
-  // This is fast and actually only uses 4 bytes per simple line
-  switch (result) {
-  case 0x1C: result = 'a'; break;
-  case 0x32: result = 'b'; break;
-  case 0x21: result = 'c'; break;
-  case 0x23: result = 'd'; break;
-  case 0x24: result = 'e'; break;
-  case 0x2B: result = 'f'; break;
-  case 0x34: result = 'g'; break;
-  case 0x33: result = 'h'; break;
-  case 0x43: result = 'i'; break;
-  case 0x3B: result = 'j'; break;
-  case 0x42: result = 'k'; break;
-  case 0x4B: result = 'l'; break;
-  case 0x3A: result = 'm'; break;
-  case 0x31: result = 'n'; break;
-  case 0x44: result = 'o'; break;
-  case 0x4D: result = 'p'; break;
-  case 0x15: result = 'q'; break;
-  case 0x2D: result = 'r'; break;
-  case 0x1B: result = 's'; break;
-  case 0x2C: result = 't'; break;
-  case 0x3C: result = 'u'; break;
-  case 0x2A: result = 'v'; break;
-  case 0x1D: result = 'w'; break;
-  case 0x22: result = 'x'; break;
-  case 0x35: result = 'y'; break;
-  case 0x1A: result = 'z'; break;
+  DataPin = data_pin;
+  keymap = &map;
 
-    // note that caps lock only used on a-z
-  case 0x41: result = ps2Keyboard_shift? '<' : ','; break;
-  case 0x49: result = ps2Keyboard_shift? '>' : '.'; break;
-  case 0x4A: result = ps2Keyboard_shift? '?' : '/'; break;
-  case 0x54: result = ps2Keyboard_shift? '{' : '['; break;
-  case 0x5B: result = ps2Keyboard_shift? '}' : ']'; break;
-  case 0x4E: result = ps2Keyboard_shift? '_' : '-'; break;
-  case 0x55: result = ps2Keyboard_shift? '+' : '='; break;
-  case 0x29: result = ' '; break;
+  // initialize the pins
+#ifdef INPUT_PULLUP
+  pinMode(irq_pin, INPUT_PULLUP);
+  pinMode(data_pin, INPUT_PULLUP);
+#else
+  pinMode(irq_pin, INPUT);
+  digitalWrite(irq_pin, HIGH);
+  pinMode(data_pin, INPUT);
+  digitalWrite(data_pin, HIGH);
+#endif
 
-  case 0x45: result = ps2Keyboard_shift? ')' : '0'; break;
-  case 0x16: result = ps2Keyboard_shift? '!' : '1'; break;
-  case 0x1E: result = ps2Keyboard_shift? '@' : '2'; break;
-  case 0x26: result = ps2Keyboard_shift? '£' : '3'; break;
-  case 0x25: result = ps2Keyboard_shift? '$' : '4'; break;
-  case 0x2E: result = ps2Keyboard_shift? '%' : '5'; break;
-  case 0x36: result = ps2Keyboard_shift? '^' : '6'; break;
-  case 0x3D: result = ps2Keyboard_shift? '&' : '7'; break;
-  case 0x3E: result = ps2Keyboard_shift? '*' : '8'; break;
-  case 0x46: result = ps2Keyboard_shift? '(' : '9'; break;
+#ifdef CORE_INT_EVERY_PIN
+  irq_num = irq_pin;
 
-  case 0x0D: result = '\t'; break;
-  case 0x5A: result = '\n'; break;
-  case 0x66: result = PS2_KC_BKSP;  break;
-  case 0x69: result = ps2Keyboard_extend? PS2_KC_END   : '1'; break;
-  case 0x6B: result = ps2Keyboard_extend? PS2_KC_LEFT  : '4'; break;
-  case 0x6C: result = ps2Keyboard_extend? PS2_KC_HOME  : '7'; break;
-  case 0x70: result = ps2Keyboard_extend? PS2_KC_INS   : '0'; break;
-  case 0x71: result = ps2Keyboard_extend? PS2_KC_DEL   : '.'; break;
-  case 0x72: result = ps2Keyboard_extend? PS2_KC_DOWN  : '2'; break;
-  case 0x73: result = '5'; break;
-  case 0x74: result = ps2Keyboard_extend? PS2_KC_RIGHT : '6'; break;
-  case 0x75: result = ps2Keyboard_extend? PS2_KC_UP    : '8'; break;
-  case 0x76: result = PS2_KC_ESC; break;
-  case 0x79: result = '+'; break;
-  case 0x7A: result = ps2Keyboard_extend? PS2_KC_PGDN  : '3'; break;
-  case 0x7B: result = '-'; break;
-  case 0x7C: result = '*'; break;
-  case 0x7D: result = ps2Keyboard_extend? PS2_KC_PGUP  : '9'; break;
-
-  case 0x58:
-    // setting the keyboard lights is done here. Ideally it would be done
-    // in the interrupt routine itself and the key codes associated wth
-    // caps lock key presses would never be passed on as characters.
-    // However it would make the interrupt routine very messy with lots
-    // of extra state associated with the control of a caps_lock
-    // key code causing a cmd byte to transmit, causing an ack_byte to
-    // be received, then a data byte to transmit. Much easier done here.
-    // The downside, however, is that the light going on or off at the
-    // right time relies on the calling program to be checking for
-    // characters on a regular basis. If the calling program stops
-    // polling for characters at any point pressing the caps lock key
-    // will not change the state of the caps lock light while polling
-    // is not happening.
-    result = ps2Keyboard_caps_lock? PS2_KC_CLON : PS2_KC_CLOFF;
-    if (ps2Keyboard_caps_lock) kbd_set_lights(4);
-    else                       kbd_set_lights(0);
-    break;
-
-    // Reset the shift counter for unexpected values, to get back into sink
-    // This allows for hot plugging a keyboard in and out
-  default:  delay(500); // but wait a bit in case part way through a shift
-            ps2Keyboard_BufferPos  = 0;
-            ps2Keyboard_shift      = false;
-            ps2Keyboard_ctrl       = false;
-            ps2Keyboard_alt        = false;
-            ps2Keyboard_extend     = false;
-            ps2Keyboard_release    = false;
-            ps2Keyboard_caps_lock  = false;
-  } // end switch(result)
-
-  // shift a-z chars here (less code than in the switch statement)
-  if (((result>='a') && (result<='z')) &&
-      ((ps2Keyboard_shift && !ps2Keyboard_caps_lock) ||
-       (!ps2Keyboard_shift && ps2Keyboard_caps_lock))) {
-    result = result + ('A'-'a');
+#else
+  switch(irq_pin) {
+    #ifdef CORE_INT0_PIN
+    case CORE_INT0_PIN:
+      irq_num = 0;
+      break;
+    #endif
+    #ifdef CORE_INT1_PIN
+    case CORE_INT1_PIN:
+      irq_num = 1;
+      break;
+    #endif
+    #ifdef CORE_INT2_PIN
+    case CORE_INT2_PIN:
+      irq_num = 2;
+      break;
+    #endif
+    #ifdef CORE_INT3_PIN
+    case CORE_INT3_PIN:
+      irq_num = 3;
+      break;
+    #endif
+    #ifdef CORE_INT4_PIN
+    case CORE_INT4_PIN:
+      irq_num = 4;
+      break;
+    #endif
+    #ifdef CORE_INT5_PIN
+    case CORE_INT5_PIN:
+      irq_num = 5;
+      break;
+    #endif
+    #ifdef CORE_INT6_PIN
+    case CORE_INT6_PIN:
+      irq_num = 6;
+      break;
+    #endif
+    #ifdef CORE_INT7_PIN
+    case CORE_INT7_PIN:
+      irq_num = 7;
+      break;
+    #endif
   }
+#endif
 
-  // done with the character
-  ps2Keyboard_CharBuffer = 0;
-
-  return(result);
+  head = 0;
+  tail = 0;
+  if (irq_num < 255) {
+    attachInterrupt(irq_num, ps2interrupt, FALLING);
+  }
 }
 
 
