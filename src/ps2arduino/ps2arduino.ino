@@ -3,26 +3,33 @@
 */
 #include "PS2Keyboard.h"
 
-#define KBD_CLK_PIN 3
-#define KBD_DATA_PIN 4
+#define CLOCK_PIN 3
+#define DATA_PIN 4
 
 PS2Keyboard keyboard;
+char c;
 
 void setup()
 {
   Serial.begin(9600); 
-  Serial.print("setup()");
+  Serial.println("setup()");
   
   delay(1000);
-  keyboard.begin(KBD_DATA_PIN);
+  keyboard.begin(DATA_PIN, CLOCK_PIN);
 }
 
 void loop()
 {
+  Serial.println("loop()");
   if(keyboard.available())
   {
-    byte e = keyboard.read_extra();
-    byte c = keyboard.read();
+    Serial.println("keyboard.available()");
+
+    c = keyboard.read();
+
+    Serial.println("char!");
+
+    Serial.println(c);
   }
 }
 
